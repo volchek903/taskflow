@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{box-sizing:border-box}body{margin:0;padding:0;background:var(--tg-theme-bg-color);color:var(--tg-theme-text-color);font-family:system-ui,sans-serif}.shell{padding:18px}.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px}.brand{font-size:12px;font-weight:800;letter-spacing:2.5px}.date{color:var(--tg-theme-hint-color);font-size:12px}.title{font-size:23px;font-weight:760;margin:0 0 5px}.sub{color:var(--tg-theme-hint-color);font-size:12px}.progress{height:5px;background:var(--tg-theme-secondary-bg-color);border-radius:9px;margin:14px 0 17px;overflow:hidden}.progress i{display:block;width:40%;height:100%;background:var(--tg-theme-button-color);border-radius:9px}.task{display:flex;align-items:center;gap:11px;padding:10px 0;border-top:1px solid var(--tg-theme-section-separator-color)}.check{width:21px;height:21px;flex:none;border:1.5px solid var(--tg-theme-hint-color);border-radius:6px;background:transparent;padding:0}.check.done{background:var(--tg-theme-button-color);border-color:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color)}.check.done:after{content:'✓';font-weight:800}.name{flex:1;font-size:14px}.name.done{text-decoration:line-through;color:var(--tg-theme-hint-color)}.time{font-size:11px;color:var(--tg-theme-hint-color)}.hint{margin-top:13px;padding:10px 12px;border-radius:9px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-subtitle-text-color);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="top"><span class="brand">TASKFLOW</span><span class="date">Сегодня</span></div>
+  <div class="title">Мои задачи</div>
+  <div class="sub"><span id="done">2</span> из 5 выполнено</div>
+  <div class="progress"><i id="bar"></i></div>
+  <div class="task"><button class="check done" onclick="toggle(this)"></button><span class="name done">Подготовить макеты</span><span class="time">12:00</span></div>
+  <div class="task"><button class="check" onclick="toggle(this)"></button><span class="name">Исправить авторизацию</span><span class="time">14:00</span></div>
+  <div class="task"><button class="check done" onclick="toggle(this)"></button><span class="name done">Обсудить запуск</span><span class="time">15:30</span></div>
+  <div class="task"><button class="check" onclick="toggle(this)"></button><span class="name">Обновить документацию</span><span class="time">17:00</span></div>
+  <div class="hint">Полный список откроется по кнопке под виджетом</div>
+</div>
+<script>
+var W=TelegramWidget,completed=2;
+function toggle(button){var wasDone=button.classList.contains('done');button.classList.toggle('done');button.parentNode.querySelector('.name').classList.toggle('done');completed+=wasDone?-1:1;document.getElementById('done').textContent=completed;document.getElementById('bar').style.width=(completed/5*100)+'%';W.HapticFeedback.impactOccurred('light')}
+W.ready();
+</script>
+</body>
+</html>

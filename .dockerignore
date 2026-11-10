@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.DS_Store
+__pycache__
+*.pyc
+frontend/node_modules
+frontend/dist
+frontend/.vercel
+frontend/*.tsbuildinfo
+frontend/.DS_Store
+frontend/work
