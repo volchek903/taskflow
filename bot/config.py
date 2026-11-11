@@ -13,6 +13,9 @@ class Settings:
     port: int
     log_level: str
     bot_api_base: str
+    database_path: str
+    allow_dev_auth: bool
+    bot_username: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -36,4 +39,7 @@ class Settings:
             port=port,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             bot_api_base=os.getenv("BOT_API_BASE", "https://api.telegram.org").rstrip("/"),
+            database_path=os.getenv("DATABASE_PATH", "/data/taskflow.db"),
+            allow_dev_auth=os.getenv("ALLOW_DEV_AUTH", "false").lower() in {"1", "true", "yes"},
+            bot_username=os.getenv("BOT_USERNAME", "").strip().lstrip("@"),
         )

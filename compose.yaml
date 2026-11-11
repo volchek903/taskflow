@@ -4,12 +4,17 @@ services:
     restart: unless-stopped
     environment:
       BOT_TOKEN: ${BOT_TOKEN}
+      BOT_USERNAME: ${BOT_USERNAME:-}
       WEBAPP_URL: ${WEBAPP_URL}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HOST: 0.0.0.0
       PORT: 8080
+      DATABASE_PATH: /data/taskflow.db
+      ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-false}
     ports:
       - "127.0.0.1:${APP_PORT:-8080}:8080"
+    volumes:
+      - taskflow_data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
       interval: 30s
@@ -35,5 +40,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  taskflow_data:
   caddy_data:
   caddy_config:

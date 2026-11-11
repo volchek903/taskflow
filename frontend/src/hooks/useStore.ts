@@ -1,9 +1,18 @@
-import {useState,useEffect} from 'react';
-import type {Store,Task} from '../types';
+import {useCallback,useEffect,useState} from 'react';
+import {api} from '../api';
+import type {Invite,Store,Task} from '../types';
 export const localDate=(date=new Date())=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
-const today=localDate();
-const projects=[{id:'design',name:'Редизайн приложения'},{id:'dev',name:'Разработка'},{id:'launch',name:'Запуск продукта'},{id:'personal',name:'Личное'}];
-const task=(id:string,title:string,project:string,time:string,done=false):Task=>({id,title,project,time,done,status:done?'Готово':'Запланировано',due:today,priority:'Средний',description:'',checklist:[]});
-const seed:Store={projects,tasks:[task('1','Подготовить макеты','design','12:00',true),{...task('2','Исправить авторизацию','dev','14:00'),status:'В работе',priority:'Высокий',description:'Проверить вход после обновления и обработку сессии.',checklist:[{text:'Воспроизвести ошибку',done:true},{text:'Исправить обработку токена',done:false},{text:'Проверить на устройстве',done:false}]},task('3','Обсудить запуск','launch','15:30',true),task('4','Обновить документацию','dev','17:00'),task('5','Забрать посылку','personal','19:00')],notices:[{id:'welcome',title:'Добро пожаловать в Taskflow',text:'Создайте первую задачу или изучите проекты. Данные хранятся на этом устройстве.',read:false}]};
-function load():Store{try{const value=JSON.parse(localStorage.getItem('taskflow-v1')||'null') as Store|null;if(value&&Array.isArray(value.tasks)&&Array.isArray(value.projects)&&Array.isArray(value.notices)&&value.tasks.every(t=>typeof t.id==='string'&&typeof t.title==='string'&&Array.isArray(t.checklist)))return value;}catch{/* A damaged or unavailable store must not prevent startup. */}return structuredClone(seed)}
-export function useStore(){const [data,setData]=useState<Store>(load);const [error,setError]=useState(false);useEffect(()=>{try{localStorage.setItem('taskflow-v1',JSON.stringify(data));setError(false)}catch{setError(true)}},[data]);return {data,setData,error};}
+const empty:Store={user:{id:'',telegramId:'',firstName:'',lastName:'',name:'Пользователь'},projects:[],tasks:[],notices:[]};
+export function useStore(){
+ const [data,setData]=useState<Store>(empty);const [loading,setLoading]=useState(true);const [error,setError]=useState('');
+ const reload=useCallback(async()=>{try{setError('');setData(await api<Store>('/bootstrap'))}catch(value){setError(value instanceof Error?value.message:'Не удалось загрузить данные')}finally{setLoading(false)}},[]);
+ useEffect(()=>{void reload()},[reload]);
+ async function createProject(name:string){await api('/projects',{method:'POST',body:JSON.stringify({name})});await reload()}
+ async function setJoinEnabled(id:string,joinEnabled:boolean){await api(`/projects/${id}`,{method:'PATCH',body:JSON.stringify({joinEnabled})});await reload()}
+ async function createInvite(id:string,identifier?:string){return api<Invite>(`/projects/${id}/invites`,{method:'POST',body:JSON.stringify({identifier})})}
+ async function joinProject(code:string){const result=await api<{projectId:string}>('/invites/join',{method:'POST',body:JSON.stringify({code})});await reload();return result.projectId}
+ async function createTask(task:Task){await api('/tasks',{method:'POST',body:JSON.stringify(task)});await reload()}
+ async function updateTask(task:Task){setData(current=>({...current,tasks:current.tasks.map(item=>item.id===task.id?task:item)}));try{await api(`/tasks/${task.id}`,{method:'PATCH',body:JSON.stringify(task)})}catch(value){await reload();throw value}}
+ async function reorderTasks(tasks:Task[]){setData(current=>({...current,tasks}));try{await api('/tasks/reorder',{method:'POST',body:JSON.stringify({tasks:tasks.map((task,index)=>({id:task.id,status:task.status,done:task.done,position:index}))})})}catch(value){await reload();throw value}}
+ return {data,loading,error,reload,actions:{createProject,setJoinEnabled,createInvite,joinProject,createTask,updateTask,reorderTasks}};
+}

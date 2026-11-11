@@ -21,7 +21,7 @@ COPY bot ./bot
 COPY main.py ./main.py
 COPY --from=frontend-builder /build/frontend/dist ./frontend/dist
 
-RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
+RUN useradd --create-home --uid 10001 appuser && mkdir -p /data && chown -R appuser:appuser /app /data
 USER appuser
 
 EXPOSE 8080

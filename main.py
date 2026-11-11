@@ -8,6 +8,7 @@ from aiohttp import web
 
 from bot.app import TaskflowBot
 from bot.config import Settings
+from bot.db import Database
 from bot.server import create_app
 
 ROOT = Path(__file__).resolve().parent
@@ -15,6 +16,8 @@ ROOT = Path(__file__).resolve().parent
 
 async def run() -> None:
     settings = Settings.from_env()
+    database = Database(settings.database_path)
+    await database.initialize()
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -24,7 +27,7 @@ async def run() -> None:
     if not (frontend_dir / "index.html").is_file():
         raise RuntimeError("frontend/dist is missing; build the frontend first")
 
-    runner = web.AppRunner(create_app(frontend_dir))
+    runner = web.AppRunner(create_app(frontend_dir, settings, database))
     await runner.setup()
     site = web.TCPSite(runner, settings.host, settings.port)
     await site.start()
@@ -33,7 +36,7 @@ async def run() -> None:
     )
 
     try:
-        await TaskflowBot(settings).run()
+        await TaskflowBot(settings, database).run()
     finally:
         await runner.cleanup()
 
