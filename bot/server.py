@@ -63,14 +63,19 @@ def create_app(frontend_dir: Path, settings: Settings, database: Database) -> we
 
     async def update_project(request: web.Request) -> web.Response:
         user_id = await authenticate(request); payload = await json_body(request)
-        if "joinEnabled" not in payload: raise ValueError("Не указано состояние доступа")
-        await database.set_join_enabled(user_id, request.match_info["project_id"], bool(payload["joinEnabled"]))
+        project_id = request.match_info["project_id"]
+        if "statuses" in payload:
+            await database.set_statuses(user_id, project_id, payload["statuses"], payload.get("renames"))
+        elif "joinEnabled" in payload:
+            await database.set_join_enabled(user_id, project_id, bool(payload["joinEnabled"]))
+        else:
+            raise ValueError("Не указаны настройки проекта")
         return web.json_response({"ok": True})
 
     async def create_invite(request: web.Request) -> web.Response:
         user_id = await authenticate(request); payload = await json_body(request)
-        identifier = str(payload.get("identifier", "")).strip() or None
-        invite = await database.create_invite(user_id, request.match_info["project_id"], identifier)
+        identifier = str(payload.get("identifier") or "").strip() or None
+        invite = await database.create_invite(user_id, request.match_info["project_id"], identifier, payload.get("role", "member"))
         invite["url"] = (f"https://t.me/{settings.bot_username}?start=join_{invite['code']}"
                          if settings.bot_username else f"{settings.webapp_url}/#/join/{invite['code']}")
         telegram_id = invite.pop("telegramId", None)
@@ -90,6 +95,20 @@ def create_app(frontend_dir: Path, settings: Settings, database: Database) -> we
         if not code: raise ValueError("Введите код приглашения")
         project_id = await database.join_invite(user_id, code)
         return web.json_response({"projectId": project_id})
+
+    async def set_member(request: web.Request) -> web.Response:
+        user_id = await authenticate(request); payload = await json_body(request)
+        await database.set_member(user_id, request.match_info["project_id"], str(payload.get("identifier", "")), payload.get("role", "member"))
+        return web.json_response({"ok": True})
+
+    async def preview_invite(request: web.Request) -> web.Response:
+        user_id = await authenticate(request)
+        return web.json_response(await database.preview_invite(user_id, request.match_info["code"]))
+
+    async def decline_invite(request: web.Request) -> web.Response:
+        user_id = await authenticate(request); payload = await json_body(request)
+        await database.decline_invite(user_id, str(payload.get("code", "")))
+        return web.json_response({"ok": True})
 
     async def create_task(request: web.Request) -> web.Response:
         user_id = await authenticate(request); payload = await json_body(request)
@@ -123,6 +142,9 @@ def create_app(frontend_dir: Path, settings: Settings, database: Database) -> we
     app.router.add_post("/api/projects", create_project)
     app.router.add_patch("/api/projects/{project_id}", update_project)
     app.router.add_post("/api/projects/{project_id}/invites", create_invite)
+    app.router.add_post("/api/projects/{project_id}/members", set_member)
+    app.router.add_get("/api/invites/{code}", preview_invite)
+    app.router.add_post("/api/invites/decline", decline_invite)
     app.router.add_post("/api/invites/join", join_invite)
     app.router.add_post("/api/tasks", create_task)
     app.router.add_patch("/api/tasks/{task_id}", update_task)

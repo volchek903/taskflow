@@ -36,9 +36,16 @@ async def run() -> None:
     )
 
     try:
-        await TaskflowBot(settings, database).run()
+        try:
+            await TaskflowBot(settings, database).run()
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Telegram bot failed to start; HTTP API remains available"
+            )
+            await asyncio.Event().wait()
     finally:
         await runner.cleanup()
+
 
 
 if __name__ == "__main__":

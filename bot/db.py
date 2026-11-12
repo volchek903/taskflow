@@ -67,7 +67,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS project_members (
                     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL CHECK(role IN ('owner','member')),
+                    role TEXT NOT NULL CHECK(role IN ('owner','admin','member','viewer')),
                     joined_at TEXT NOT NULL,
                     PRIMARY KEY(project_id, user_id)
                 );
@@ -79,6 +79,11 @@ class Database:
                     invited_user_id INTEGER REFERENCES users(id),
                     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','accepted','revoked')),
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS invite_declines (
+                    invite_id TEXT NOT NULL REFERENCES project_invites(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    PRIMARY KEY(invite_id,user_id)
                 );
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
@@ -104,6 +109,26 @@ class Database:
                     position INTEGER NOT NULL DEFAULT 0
                 );
             """)
+
+            # Upgrade existing installations without losing memberships or invitations.
+            member_sql = connection.execute("SELECT sql FROM sqlite_master WHERE name='project_members'").fetchone()[0]
+            if "'viewer'" not in member_sql:
+                connection.executescript("""
+                    CREATE TABLE project_members_new (
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        role TEXT NOT NULL CHECK(role IN ('owner','admin','member','viewer')),
+                        joined_at TEXT NOT NULL, PRIMARY KEY(project_id,user_id));
+                    INSERT INTO project_members_new SELECT * FROM project_members;
+                    DROP TABLE project_members;
+                    ALTER TABLE project_members_new RENAME TO project_members;
+                """)
+            for table, column, declaration in (
+                ("projects", "statuses", "TEXT NOT NULL DEFAULT '[\"Запланировано\",\"В работе\",\"Готово\"]'"),
+                ("project_invites", "role", "TEXT NOT NULL DEFAULT 'member'"),
+            ):
+                if column not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
         await self._run(migrate, write=True)
 
@@ -141,7 +166,7 @@ class Database:
         """, (row["id"],)).fetchall()
         members = [{**self._user(member), "role": member["role"]} for member in member_rows]
         return {"id": row["id"], "name": row["name"], "ownerId": str(row["owner_id"]),
-                "joinEnabled": bool(row["join_enabled"]), "members": members, "memberCount": len(members)}
+                "statuses": json.loads(row["statuses"]), "joinEnabled": bool(row["join_enabled"]), "members": members, "memberCount": len(members)}
 
     def _tasks(self, connection: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
         rows = connection.execute("""
@@ -168,13 +193,13 @@ class Database:
                 WHERE pm.user_id=? ORDER BY p.created_at DESC
             """, (user_id,)).fetchall()
             invite_rows = connection.execute("""
-                SELECT i.id,i.code,p.name,u.first_name,u.last_name FROM project_invites i
+                SELECT i.id,i.code,i.role,p.name,u.first_name,u.last_name FROM project_invites i
                 JOIN projects p ON p.id=i.project_id JOIN users u ON u.id=i.created_by
                 WHERE i.invited_user_id=? AND i.status='active' ORDER BY i.created_at DESC
             """, (user_id,)).fetchall()
             notices = [{"id": row["id"], "title": f"Приглашение в «{row['name']}»",
                         "text": f"{row['first_name']} {row['last_name']} приглашает вас в проект.",
-                        "read": False, "inviteCode": row["code"]} for row in invite_rows]
+                        "read": False, "role": row["role"], "inviteCode": row["code"]} for row in invite_rows]
             return {"user": self._user(user_row), "projects": [self._project(connection, row) for row in project_rows],
                     "tasks": self._tasks(connection, user_id), "notices": notices}
 
@@ -198,7 +223,8 @@ class Database:
                 raise PermissionError("Only the project owner can change access")
         await self._run(query, write=True)
 
-    async def create_invite(self, user_id: int, project_id: str, identifier: str | None) -> dict[str, str]:
+    async def create_invite(self, user_id: int, project_id: str, identifier: str | None, role: str = "member") -> dict[str, str]:
+        self._validate_role(role)
         def query(connection: sqlite3.Connection) -> dict[str, str]:
             project = connection.execute("SELECT * FROM projects WHERE id=? AND owner_id=?", (project_id, user_id)).fetchone()
             if not project:
@@ -221,8 +247,8 @@ class Database:
                     raise ValueError("Пользователь уже состоит в проекте")
             code = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10].upper()
             invite_id = str(uuid.uuid4())
-            connection.execute("""INSERT INTO project_invites(id,project_id,code,created_by,invited_user_id,created_at)
-                                VALUES(?,?,?,?,?,?)""", (invite_id, project_id, code, user_id, invited_id, now()))
+            connection.execute("""INSERT INTO project_invites(id,project_id,code,created_by,invited_user_id,created_at,role)
+                                VALUES(?,?,?,?,?,?,?)""", (invite_id, project_id, code, user_id, invited_id, now(), role))
             result = {"id": invite_id, "code": code, "projectName": project["name"]}
             if identifier and target:
                 result["telegramId"] = str(target["telegram_id"])
@@ -233,14 +259,16 @@ class Database:
         def query(connection: sqlite3.Connection) -> str:
             invite = connection.execute("""SELECT i.*,p.join_enabled FROM project_invites i
                                          JOIN projects p ON p.id=i.project_id WHERE upper(i.code)=upper(?)""", (code,)).fetchone()
-            if not invite or invite["status"] == "revoked":
+            if not invite or invite["status"] != "active":
                 raise LookupError("Приглашение не найдено или отозвано")
+            if connection.execute("SELECT 1 FROM invite_declines WHERE invite_id=? AND user_id=?", (invite["id"], user_id)).fetchone():
+                raise PermissionError("Вы отклонили это приглашение")
             if not invite["join_enabled"]:
                 raise PermissionError("Владелец временно закрыл присоединение к проекту")
             if invite["invited_user_id"] and invite["invited_user_id"] != user_id:
                 raise PermissionError("Это приглашение предназначено другому пользователю")
             connection.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role,joined_at) VALUES(?,?,?,?)",
-                               (invite["project_id"], user_id, "member", now()))
+                               (invite["project_id"], user_id, invite["role"], now()))
             if invite["invited_user_id"]:
                 connection.execute("UPDATE project_invites SET status='accepted' WHERE id=?", (invite["id"],))
             return str(invite["project_id"])
@@ -251,12 +279,102 @@ class Database:
         if not connection.execute("SELECT 1 FROM project_members WHERE project_id=? AND user_id=?", (project_id, user_id)).fetchone():
             raise PermissionError("Нет доступа к проекту")
 
+    @staticmethod
+    def _validate_role(role: str) -> None:
+        if role not in ("admin", "member", "viewer"):
+            raise ValueError("Неизвестная роль")
+
+    @staticmethod
+    def _assert_owner(connection: sqlite3.Connection, user_id: int, project_id: str) -> None:
+        if not connection.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=?", (project_id, user_id)).fetchone():
+            raise PermissionError("Только владелец может управлять проектом")
+
+    @staticmethod
+    def _assert_editor(connection: sqlite3.Connection, user_id: int, project_id: str) -> None:
+        row = connection.execute("SELECT role FROM project_members WHERE project_id=? AND user_id=?", (project_id, user_id)).fetchone()
+        if not row or row["role"] == "viewer":
+            raise PermissionError("Нет прав на изменение задач")
+
+    async def set_member(self, user_id: int, project_id: str, identifier: str, role: str) -> None:
+        self._validate_role(role)
+        def query(connection: sqlite3.Connection) -> None:
+            self._assert_owner(connection, user_id, project_id)
+            cleaned = identifier.strip().lstrip("@")
+            target = connection.execute("SELECT id FROM users WHERE telegram_id=?" if cleaned.isdigit() else
+                                        "SELECT id FROM users WHERE lower(username)=lower(?)",
+                                        (int(cleaned) if cleaned.isdigit() else cleaned,)).fetchone()
+            if not target:
+                raise LookupError("Пользователь ещё не запускал Taskflow")
+            if target["id"] == user_id:
+                raise ValueError("Нельзя изменить роль владельца")
+            connection.execute("""INSERT INTO project_members(project_id,user_id,role,joined_at) VALUES(?,?,?,?)
+                ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role""", (project_id, target["id"], role, now()))
+            connection.execute("UPDATE project_invites SET status='revoked' WHERE project_id=? AND invited_user_id=? AND status='active'", (project_id, target["id"]))
+        await self._run(query, write=True)
+
+    async def set_statuses(self, user_id: int, project_id: str, statuses: list[str], renames: dict[str, str] | None = None) -> None:
+        if (not isinstance(statuses, list) or not 1 <= len(statuses) <= 20 or
+                any(not isinstance(value, str) or not value.strip() or len(value) > 50 for value in statuses)):
+            raise ValueError("Укажите от 1 до 20 статусов длиной до 50 символов")
+        if renames is not None and (not isinstance(renames, dict) or any(not isinstance(key, str) or value not in statuses for key, value in renames.items())):
+            raise ValueError("Некорректное переименование статусов")
+        statuses = [value.strip() for value in statuses]
+        if len(set(statuses)) != len(statuses):
+            raise ValueError("Названия статусов должны отличаться")
+        def query(connection: sqlite3.Connection) -> None:
+            role = connection.execute("SELECT role FROM project_members WHERE project_id=? AND user_id=?", (project_id, user_id)).fetchone()
+            if not role or role["role"] not in ("owner", "admin"):
+                raise PermissionError("Только владелец и администратор могут менять разделы")
+            connection.execute("UPDATE projects SET statuses=? WHERE id=?", (json.dumps(statuses, ensure_ascii=False), project_id))
+            rows = connection.execute("SELECT id,status FROM tasks WHERE project_id=?", (project_id,)).fetchall()
+            for row in rows:
+                target = (renames or {}).get(row["status"], row["status"])
+                if target not in statuses:
+                    target = statuses[0]
+                if target != row["status"]:
+                    connection.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (target, now(), row["id"]))
+        await self._run(query, write=True)
+
+    @staticmethod
+    def _assert_status(connection: sqlite3.Connection, project_id: str, status: str) -> None:
+        row = connection.execute("SELECT statuses FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not row or status not in json.loads(row["statuses"]):
+            raise ValueError("Выберите статус проекта")
+
+    async def preview_invite(self, user_id: int, code: str) -> dict[str, Any]:
+        def query(connection: sqlite3.Connection) -> dict[str, Any]:
+            row = connection.execute("""SELECT i.*,p.name,p.join_enabled FROM project_invites i
+                JOIN projects p ON p.id=i.project_id WHERE upper(i.code)=upper(?)""", (code,)).fetchone()
+            if not row or row["status"] != "active":
+                raise LookupError("Приглашение не найдено или уже обработано")
+            if row["invited_user_id"] and row["invited_user_id"] != user_id:
+                raise PermissionError("Это приглашение предназначено другому пользователю")
+            if connection.execute("SELECT 1 FROM invite_declines WHERE invite_id=? AND user_id=?", (row["id"], user_id)).fetchone():
+                raise PermissionError("Вы отклонили это приглашение")
+            if not row["join_enabled"]:
+                raise PermissionError("Приём в проект закрыт")
+            return {"projectName": row["name"], "role": row["role"], "code": row["code"]}
+        return await self._run(query)
+
+    async def decline_invite(self, user_id: int, code: str) -> None:
+        def query(connection: sqlite3.Connection) -> None:
+            row = connection.execute("SELECT * FROM project_invites WHERE upper(code)=upper(?)", (code,)).fetchone()
+            if not row or row["status"] != "active":
+                raise LookupError("Приглашение не найдено или уже обработано")
+            if row["invited_user_id"] and row["invited_user_id"] != user_id:
+                raise PermissionError("Это приглашение предназначено другому пользователю")
+            connection.execute("INSERT OR IGNORE INTO invite_declines(invite_id,user_id) VALUES(?,?)", (row["id"], user_id))
+            if row["invited_user_id"]:
+                connection.execute("UPDATE project_invites SET status='revoked' WHERE id=?", (row["id"],))
+        await self._run(query, write=True)
+
     async def create_task(self, user_id: int, payload: dict[str, Any]) -> str:
         def query(connection: sqlite3.Connection) -> str:
-            project_id = str(payload.get("project", "")); self._assert_member(connection, user_id, project_id)
+            project_id = str(payload.get("project", "")); self._assert_editor(connection, user_id, project_id)
             assignee = int(payload["assigneeId"]) if payload.get("assigneeId") else None
             if assignee is not None:
                 self._assert_member(connection, assignee, project_id)
+            self._assert_status(connection, project_id, payload.get("status", "Запланировано"))
             task_id = str(payload.get("id") or uuid.uuid4()); timestamp = now()
             position = connection.execute("SELECT COALESCE(MAX(position),-1)+1 AS value FROM tasks WHERE project_id=?", (project_id,)).fetchone()["value"]
             connection.execute("""INSERT INTO tasks(id,project_id,title,description,priority,due,time,status,done,assignee_id,created_by,position,created_at,updated_at)
@@ -271,11 +389,12 @@ class Database:
         def query(connection: sqlite3.Connection) -> None:
             task = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not task: raise LookupError("Задача не найдена")
-            self._assert_member(connection, user_id, task["project_id"])
+            self._assert_editor(connection, user_id, task["project_id"])
             assignee_value = payload.get("assigneeId", str(task["assignee_id"] or ""))
             assignee = int(assignee_value) if assignee_value else None
             if assignee is not None: self._assert_member(connection, assignee, task["project_id"])
             values = {key: payload.get(key, task[column]) for key, column in (("title","title"),("description","description"),("priority","priority"),("due","due"),("time","time"),("status","status"))}
+            self._assert_status(connection, task["project_id"], values["status"])
             done = int(bool(payload.get("done", task["done"])))
             connection.execute("""UPDATE tasks SET title=?,description=?,priority=?,due=?,time=?,status=?,done=?,assignee_id=?,updated_at=? WHERE id=?""",
                                (values["title"],values["description"],values["priority"],values["due"],values["time"],values["status"],done,assignee,now(),task_id))
@@ -291,7 +410,8 @@ class Database:
             for position, item in enumerate(tasks):
                 task = connection.execute("SELECT project_id FROM tasks WHERE id=?", (item.get("id"),)).fetchone()
                 if not task: continue
-                self._assert_member(connection, user_id, task["project_id"])
+                self._assert_editor(connection, user_id, task["project_id"])
+                self._assert_status(connection, task["project_id"], item.get("status", "Запланировано"))
                 connection.execute("UPDATE tasks SET position=?,status=?,done=?,updated_at=? WHERE id=?",
                                    (position, item.get("status", "Запланировано"), int(bool(item.get("done"))), now(), item["id"]))
         await self._run(query, write=True)
